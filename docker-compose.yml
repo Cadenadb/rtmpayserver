@@ -1,0 +1,113 @@
+version: "3.8"
+
+services:
+
+  # ─── Raptoreum Node ───────────────────────────────────────────
+  raptoreumd:
+    image: cadenadb/raptoreumd:latest
+    restart: unless-stopped
+    volumes:
+      - raptoreum_data:/root/.raptoreum
+    environment:
+      - RTM_RPC_USER=${RTM_RPC_USER}
+      - RTM_RPC_PASSWORD=${RTM_RPC_PASSWORD}
+    ports:
+      - "9998:9998"   # RPC
+      - "10226:10226" # P2P
+    networks:
+      - rtmpay
+
+  # ─── Bitcoin Node (pruned) ────────────────────────────────────
+  bitcoind:
+    image: btcpayserver/bitcoin:27.0
+    restart: unless-stopped
+    volumes:
+      - bitcoin_data:/data
+    environment:
+      BITCOIN_NETWORK: ${BTC_NETWORK:-mainnet}
+      BITCOIN_EXTRA_ARGS: |
+        prune=10000
+        rpcuser=${BTC_RPC_USER}
+        rpcpassword=${BTC_RPC_PASSWORD}
+        rpcallowip=0.0.0.0/0
+        rpcbind=0.0.0.0
+    networks:
+      - rtmpay
+
+  # ─── NBXplorer (with RTM support) ────────────────────────────
+  nbxplorer:
+    image: cadenadb/nbxplorer-rtm:latest
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+      - raptoreumd
+    environment:
+      NBXPLORER_NETWORK: ${BTC_NETWORK:-mainnet}
+      NBXPLORER_BTCRPCURL: http://bitcoind:43782/
+      NBXPLORER_BTCRPCUSER: ${BTC_RPC_USER}
+      NBXPLORER_BTCRPCPASSWORD: ${BTC_RPC_PASSWORD}
+      NBXPLORER_RTMRPCURL: http://raptoreumd:9998/
+      NBXPLORER_RTMRPCUSER: ${RTM_RPC_USER}
+      NBXPLORER_RTMRPCPASSWORD: ${RTM_RPC_PASSWORD}
+      NBXPLORER_POSTGRES: User ID=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=nbxplorer
+    volumes:
+      - nbxplorer_data:/datadir
+    networks:
+      - rtmpay
+
+  # ─── PostgreSQL ───────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-btcpayserver}
+      POSTGRES_USER: ${POSTGRES_USER:-btcpay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rtmpay
+
+  # ─── BTCPayServer (with RTM support) ─────────────────────────
+  btcpayserver:
+    image: cadenadb/btcpayserver-rtm:latest
+    restart: unless-stopped
+    depends_on:
+      - nbxplorer
+      - postgres
+    environment:
+      BTCPAY_POSTGRES: User ID=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=${POSTGRES_DB}
+      BTCPAY_NETWORK: ${BTC_NETWORK:-mainnet}
+      BTCPAY_EXPLORERPOSTGRES: User ID=${POSTGRES_USER};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=nbxplorer
+      BTCPAY_HOST: ${BTCPAY_HOST}
+    ports:
+      - "3000:3000"
+    volumes:
+      - btcpay_data:/datadir
+    networks:
+      - rtmpay
+
+  # ─── LND Lightning (optional) ────────────────────────────────
+  lnd:
+    image: btcpayserver/lnd:v0.18.0-beta
+    restart: unless-stopped
+    depends_on:
+      - bitcoind
+    environment:
+      LND_ALIAS: ${LIGHTNING_ALIAS:-RTMPayNode}
+    volumes:
+      - lnd_data:/root/.lnd
+    networks:
+      - rtmpay
+
+networks:
+  rtmpay:
+    driver: bridge
+
+volumes:
+  raptoreum_data:
+  bitcoin_data:
+  nbxplorer_data:
+  postgres_data:
+  btcpay_data:
+  lnd_data:
