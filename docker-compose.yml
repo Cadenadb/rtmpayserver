@@ -1,166 +1,133 @@
 version: "3.8"
 
 # ============================================================
-# RTMPayServer — Self-hosted payment processor
-# Supports: Raptoreum (RTM), Bitcoin (BTC), Lightning Network
+# RTMPayServer — BTCPayServer with native Raptoreum (RTM) support
+# https://github.com/cadenadb/rtmpayserver
 #
-# SETUP:
-#   1. cp .env.example .env
-#   2. Edit .env with your values
-#   3. docker compose up -d
-#
-# ACCESS: http://your-server-ip:${BTCPAY_PORT:-23000}
+# Copy .env.example to .env and fill in your values before running:
+#   cp .env.example .env && nano .env
+#   docker compose up -d
 # ============================================================
 
 services:
 
-  # ── Raptoreum Full Node ────────────────────────────────────
-  raptoreumd:
-    build:
-      context: ./raptoreum
-      dockerfile: Dockerfile
-    image: ghcr.io/cadenadb/raptoreumd:latest
-    container_name: raptoreumd
+  # ── PostgreSQL database ─────────────────────────────────────
+  rtmpay-postgres:
+    image: postgres:16-alpine
+    container_name: rtmpay-postgres
     restart: unless-stopped
-    volumes:
-      - raptoreum_data:/root/.raptoreumcore
     environment:
-      - RPCUSER=${RTM_RPC_USER}
-      - RPCPASSWORD=${RTM_RPC_PASSWORD}
-    command: >
-      raptoreumd
-      -server=1
-      -txindex=1
-      -rpcuser=${RTM_RPC_USER}
-      -rpcpassword=${RTM_RPC_PASSWORD}
-      -rpcbind=0.0.0.0
-      -rpcallowip=0.0.0.0/0
-      -dbcache=512
-      -listen=1
-      -whitelist=0.0.0.0/0
-      -printtoconsole
-    ports:
-      - "${RTM_P2P_PORT:-10226}:10226"
+      POSTGRES_DB: btcpaydb
+      POSTGRES_USER: btcpay
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - rtmpay_postgres:/var/lib/postgresql/data
     networks:
       - rtmpay-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btcpay"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-  # ── Bitcoin Full Node (pruned) ─────────────────────────────
-  bitcoind:
+  # ── Bitcoin Core (for Lightning Network support) ─────────────
+  rtmpay-bitcoind:
     image: btcpayserver/bitcoin:31.0
-    container_name: bitcoind
+    container_name: rtmpay-bitcoind
     restart: unless-stopped
+    networks:
+      - rtmpay-net
     environment:
-      BITCOIN_NETWORK: ${BTC_NETWORK:-mainnet}
-      BITCOIN_EXTRA_ARGS: >
+      BITCOIN_NETWORK: ${BITCOIN_NETWORK:-mainnet}
+      BITCOIN_EXTRA_ARGS: |
         rpcuser=${BTC_RPC_USER}
         rpcpassword=${BTC_RPC_PASSWORD}
         rpcallowip=0.0.0.0/0
         rpcbind=0.0.0.0
         server=1
         txindex=1
-        prune=10000
         fallbackfee=0.0002
         listen=1
         whitelist=0.0.0.0/0
     volumes:
-      - bitcoin_data:/data
-    networks:
-      - rtmpay-net
+      - rtmpay_bitcoin:/data
 
-  # ── PostgreSQL Database ────────────────────────────────────
-  postgres:
-    image: postgres:16-alpine
-    container_name: rtmpay-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: btcpayserver
-      POSTGRES_USER: ${POSTGRES_USER:-btcpay}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - rtmpay-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-btcpay}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # ── NBXplorer with RTM Support ─────────────────────────────
-  # Custom build from: https://github.com/Cadenadb/NBXplorer
-  nbxplorer:
+  # ── NBXplorer with RTM support (custom image) ───────────────
+  # Source: https://github.com/cadenadb/NBXplorer
+  rtmpay-nbxplorer:
     image: ghcr.io/cadenadb/nbxplorer-rtm:latest
-    container_name: nbxplorer-rtm
+    container_name: rtmpay-nbxplorer
     restart: unless-stopped
     depends_on:
-      postgres:
+      rtmpay-postgres:
         condition: service_healthy
-      bitcoind:
+      rtmpay-bitcoind:
         condition: service_started
-      raptoreumd:
-        condition: service_started
+    networks:
+      - rtmpay-net
     environment:
-      NBXPLORER_NETWORK: ${BTC_NETWORK:-mainnet}
-      NBXPLORER_CHAINS: btc,rtm
-      NBXPLORER_BTCRPCURL: http://bitcoind:8332/
+      NBXPLORER_NETWORK: ${BITCOIN_NETWORK:-mainnet}
+      NBXPLORER_CHAINS: btc
+      NBXPLORER_BTCRPCURL: http://rtmpay-bitcoind:${BTC_RPC_PORT:-8332}/
       NBXPLORER_BTCRPCUSER: ${BTC_RPC_USER}
       NBXPLORER_BTCRPCPASSWORD: ${BTC_RPC_PASSWORD}
-      NBXPLORER_RTMRPCURL: http://raptoreumd:9998/
-      NBXPLORER_RTMRPCUSER: ${RTM_RPC_USER}
-      NBXPLORER_RTMRPCPASSWORD: ${RTM_RPC_PASSWORD}
-      NBXPLORER_POSTGRES: "User ID=${POSTGRES_USER:-btcpay};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=nbxplorer"
+      NBXPLORER_BTCNODEENDPOINT: rtmpay-bitcoind:${BTC_P2P_PORT:-8333}
+      NBXPLORER_POSTGRES: "User ID=btcpay;Password=${POSTGRES_PASSWORD};Host=rtmpay-postgres;Port=5432;Database=nbxplorer"
+      NBXPLORER_NOAUTH: "1"
       NBXPLORER_BIND: 0.0.0.0
-      NBXPLORER_NOAUTH: "0"
+      NBXPLORER_PORT: "24446"
     volumes:
-      - nbxplorer_data:/datadir
-    networks:
-      - rtmpay-net
+      - rtmpay_nbxplorer:/datadir
 
-  # ── BTCPayServer ───────────────────────────────────────────
-  btcpayserver:
+  # ── BTCPayServer ────────────────────────────────────────────
+  rtmpay-btcpayserver:
     image: btcpayserver/btcpayserver:2.3.9
-    container_name: btcpayserver-rtm
+    container_name: rtmpay-btcpayserver
     restart: unless-stopped
     depends_on:
-      - nbxplorer
-    ports:
-      - "${BTCPAY_PORT:-23000}:3000"
-    environment:
-      BTCPAY_NETWORK: ${BTC_NETWORK:-mainnet}
-      BTCPAY_CHAINS: btc,rtm
-      BTCPAY_HOST: ${BTCPAY_HOST:-localhost}
-      BTCPAY_POSTGRES: "User ID=${POSTGRES_USER:-btcpay};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=btcpayserver"
-      BTCPAY_EXPLORERPOSTGRES: "User ID=${POSTGRES_USER:-btcpay};Password=${POSTGRES_PASSWORD};Host=postgres;Port=5432;Database=nbxplorer"
-      BTCPAY_BTCEXPLORERURL: http://nbxplorer:24444/
-      ASPNETCORE_URLS: http://0.0.0.0:3000
-    volumes:
-      - btcpay_data:/datadir
+      - rtmpay-nbxplorer
     networks:
       - rtmpay-net
+    ports:
+      - "${BTCPAY_PORT:-23001}:3000"
+    environment:
+      BTCPAY_NETWORK: ${BITCOIN_NETWORK:-mainnet}
+      BTCPAY_CHAINS: btc
+      BTCPAY_POSTGRES: "User ID=btcpay;Password=${POSTGRES_PASSWORD};Host=rtmpay-postgres;Port=5432;Database=btcpaydb"
+      BTCPAY_EXPLORERPOSTGRES: "User ID=btcpay;Password=${POSTGRES_PASSWORD};Host=rtmpay-postgres;Port=5432;Database=nbxplorer"
+      BTCPAY_BTCEXPLORERURL: http://rtmpay-nbxplorer:24446/
+      BTCPAY_HOST: ${BTCPAY_HOST}
+      ASPNETCORE_URLS: http://0.0.0.0:3000
+    volumes:
+      - rtmpay_btcpay:/datadir
 
-  # ── Lightning Network (optional) ───────────────────────────
-  # Uncomment to enable Lightning payments
-  # lnd:
-  #   image: btcpayserver/lnd:v0.18.0-beta
-  #   container_name: lnd
+  # ── Raptoreum full node (optional, for RTM payments) ────────
+  # Uncomment this block to enable native RTM payment processing.
+  # Make sure to also add 'rtmpay-raptoreumd' to the
+  # NBXPLORER_CHAINS env var above (e.g. "btc,rtm") and set
+  # the NBXPLORER_RTM* variables.
+  #
+  # rtmpay-raptoreumd:
+  #   image: ghcr.io/cadenadb/raptoreumd:latest
+  #   container_name: rtmpay-raptoreumd
   #   restart: unless-stopped
-  #   depends_on:
-  #     - bitcoind
-  #   environment:
-  #     LND_ALIAS: ${LIGHTNING_ALIAS:-RTMPayNode}
-  #   volumes:
-  #     - lnd_data:/root/.lnd
   #   networks:
   #     - rtmpay-net
+  #   environment:
+  #     - RTM_RPC_USER=${RTM_RPC_USER}
+  #     - RTM_RPC_PASSWORD=${RTM_RPC_PASSWORD}
+  #   volumes:
+  #     - rtmpay_raptoreum:/root/.raptoreumcore
+  #   ports:
+  #     - "10226:10226"   # P2P (optional, for full node participation)
 
 networks:
   rtmpay-net:
     driver: bridge
 
 volumes:
-  raptoreum_data:
-  bitcoin_data:
-  postgres_data:
-  nbxplorer_data:
-  btcpay_data:
-  # lnd_data:
+  rtmpay_postgres:
+  rtmpay_bitcoin:
+  rtmpay_nbxplorer:
+  rtmpay_btcpay:
+  # rtmpay_raptoreum:
