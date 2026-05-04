@@ -210,18 +210,103 @@ The sync happens automatically in the background. RTM payments work immediately 
 
 ### Lightning Network (LND)
 
-LND starts automatically but requires a **one-time wallet initialization**:
+Lightning requires a **one-time wallet initialization** on first boot. Follow these steps carefully — skipping or doing them out of order will cause LND to enter a crash loop.
 
-1. Go to your BTCPayServer dashboard → **Store Settings** → **Lightning**
-2. Click **"Set up a node"**
-3. Select **"Use a custom Lightning node"**
-4. Enter this connection string:
-   ```
-   type=lnd-rest;server=https://rtmpay-lnd:8080;macaroonfilepath=/lnd/data/chain/bitcoin/mainnet/admin.macaroon;allowinsecure=true
-   ```
-5. BTCPayServer will guide you through creating your Lightning wallet
+#### Step 1 — Set your wallet password before starting
 
-> ⚠️ **Important:** Save your Lightning wallet seed phrase in a safe place. It cannot be recovered if lost.
+In your `.env` file, set a strong password for `LND_WALLET_PASSWORD` **before** running `docker compose up` for the first time:
+
+```env
+LND_WALLET_PASSWORD=your_strong_password_here
+```
+
+> ⚠️ **Critical:** This password encrypts your Lightning wallet on disk. LND needs it every time it starts to unlock the wallet automatically. If the container restarts without this variable — or with a different value — LND will fail to unlock and enter a crash loop with the error `unable to unlock macaroons: invalid password`.
+
+#### Step 2 — Start the stack and wait for LND to be ready
+
+```bash
+docker compose up -d
+sleep 30
+docker compose logs rtmpay-lnd | tail -20
+```
+
+Look for this line — it means LND is waiting for wallet creation:
+
+```
+[INF] LTND: Waiting for wallet encryption password
+```
+
+#### Step 3 — Create the wallet via LND REST API
+
+Run this from inside any container on the same Docker network, or from the host if port 8080 is exposed:
+
+```bash
+# Generate a seed phrase
+SEED=$(curl -sk https://localhost:8080/v1/genseed | python3 -c "import json,sys; print(' '.join(json.load(sys.stdin)['cipher_seed_mnemonic']))")
+echo "YOUR SEED (save this NOW): $SEED"
+
+# Create the wallet with your password
+PASS_B64=$(echo -n "your_strong_password_here" | base64)
+MNEMONIC_JSON=$(echo "$SEED" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().split()))")
+
+curl -sk -X POST https://localhost:8080/v1/initwallet   -H "Content-Type: application/json"   -d "{"wallet_password": "$PASS_B64", "cipher_seed_mnemonic": $MNEMONIC_JSON, "stateless_init": false}"
+```
+
+> ⚠️ **Save your seed phrase immediately.** Write it down on paper and store it in a safe place. This 24-word phrase is the only way to recover your Lightning funds if you lose access to your server. It cannot be retrieved later.
+
+The password in the `curl` command must match `LND_WALLET_PASSWORD` in your `.env` exactly.
+
+#### Step 4 — Verify Lightning is running
+
+```bash
+docker compose logs rtmpay-lnd | grep -E "INF|ERR" | tail -10
+```
+
+You should see lines like `[INF] LNWL: Opened wallet` and `[INF] DISC: Attempting to bootstrap` — these confirm the wallet is unlocked and LND is running.
+
+#### Step 5 — Connect BTCPayServer to your Lightning node
+
+The `docker-compose.yml` already configures BTCPayServer to connect to LND automatically via:
+
+```
+type=lnd-rest;server=https://rtmpay-lnd:8080;macaroonfilepath=/lnd/data/chain/bitcoin/mainnet/admin.macaroon;allowinsecure=true
+```
+
+No manual configuration in the dashboard is needed.
+
+#### What happens on future restarts
+
+After the wallet is created, LND uses `LND_WALLET_PASSWORD` from your `.env` to unlock automatically on every startup. As long as that variable is set correctly, no manual intervention is needed.
+
+---
+
+#### ⚠️ LND Crash Loop — How to diagnose
+
+If LND is stuck in a restart loop, check its logs:
+
+```bash
+docker compose logs rtmpay-lnd | tail -20
+```
+
+| Error message | Cause | Fix |
+|---|---|---|
+| `unable to unlock macaroons: invalid password` | `LND_WALLET_PASSWORD` doesn't match the wallet's password | Restore the correct password in `.env` and restart |
+| `invalid passphrase for master public key` | Same issue, at the wallet level | Same fix |
+| `Waiting for wallet encryption password` | Wallet not created yet | Follow Step 3 above |
+| `UNLOCK FILE DOESN'T EXIST` | Warning from old unlock mechanism — can be ignored if wallet unlocks | No action needed |
+
+If you lost the wallet password and have no funds in Lightning channels, you can reset the wallet:
+
+```bash
+# Stop LND
+docker compose stop rtmpay-lnd
+
+# Clear wallet and macaroon data (ALL LIGHTNING FUNDS WILL BE LOST)
+docker run --rm -v rtmpayserver_rtmpay_lnd:/data alpine sh -c   "rm -f /data/data/chain/bitcoin/mainnet/wallet.db          /data/data/chain/bitcoin/mainnet/macaroons.db          /data/data/chain/bitcoin/mainnet/*.macaroon &&    grep -v noseedbackup /data/lnd.conf > /tmp/lnd.conf && mv /tmp/lnd.conf /data/lnd.conf"
+
+# Set new password in .env, then restart and follow Step 3 again
+docker compose up -d rtmpay-lnd
+```
 
 ---
 
@@ -357,7 +442,13 @@ You'll see `progress=0.XXXXX` — multiply by 100 for the percentage.
 
 ### "Lightning node is waiting for wallet"
 
-This is expected on first boot. Follow the Lightning setup steps in the [Configuration section](#lightning-network-lnd).
+This is expected on **first boot only**. The wallet has not been created yet. Follow the [Lightning Network setup steps](#lightning-network-lnd) — specifically Step 3 (create wallet via REST API).
+
+### "LND is restarting every 30 seconds"
+
+Check the logs: `docker compose logs rtmpay-lnd | tail -20`
+
+The most common cause is `LND_WALLET_PASSWORD` not being set or not matching the password used when the wallet was created. See the [LND Crash Loop diagnosis table](#️-lnd-crash-loop--how-to-diagnose) in the Lightning section.
 
 ### "I can't access the web interface"
 

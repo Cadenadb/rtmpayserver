@@ -91,6 +91,7 @@ services:
       LND_CHAIN: btc
       LND_ENVIRONMENT: mainnet
       LND_ALIAS: ${LND_ALIAS:-RTMPayServer}
+      LND_WALLET_PASSWORD: ${LND_WALLET_PASSWORD}
       LND_EXTRA_ARGS: |
         bitcoin.node=bitcoind
         bitcoind.rpchost=rtmpay-bitcoind
