@@ -9,7 +9,7 @@ services:
     environment:
       POSTGRES_DB: btcpaydb
       POSTGRES_USER: btcpay
-      POSTGRES_PASSWORD: rtmpay_dev_2026
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - rtmpay_postgres:/var/lib/postgresql/data
     networks:
@@ -28,9 +28,17 @@ services:
       - rtmpay-dev
     environment:
       BITCOIN_NETWORK: mainnet
-      BITCOIN_EXTRA_ARGS: "prune=20000\nrpcuser=btcrpcuser\nrpcpassword=btcRPC_rtmpay_2026\nrpcbind=0.0.0.0\nrpcallowip=0.0.0.0/0\nwhitelist=172.20.0.0/16\nserver=1\nlisten=1\nzmqpubrawblock=tcp://0.0.0.0:28332\nzmqpubrawtx=tcp://0.0.0.0:28333\nmaxconnections=40\ndbcache=512"
+      BITCOIN_EXTRA_ARGS: "prune=20000\nrpcuser=${BTC_RPC_USER}\nrpcpassword=${BTC_RPC_PASSWORD}\nrpcbind=0.0.0.0\nrpcallowip=0.0.0.0/0\nwhitelist=172.20.0.0/16\nserver=1\nlisten=1\nzmqpubrawblock=tcp://0.0.0.0:28332\nzmqpubrawtx=tcp://0.0.0.0:28333\nmaxconnections=40\ndbcache=512"
     volumes:
       - rtmpay_bitcoin:/data
+    # Healthcheck ensures bitcoind is responding to RPC before LND starts.
+    # Without this, LND would race bitcoind on startup and fail to unlock macaroons.
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -rpcuser=${BTC_RPC_USER} -rpcpassword=${BTC_RPC_PASSWORD} -rpcport=8332 getblockchaininfo > /dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
 
   rtmpay-nbxplorer-rtm:
     image: ghcr.io/cadenadb/nbxplorer-rtm:latest
@@ -84,7 +92,8 @@ services:
     container_name: rtmpay-lnd
     restart: unless-stopped
     depends_on:
-      - rtmpay-bitcoind
+      rtmpay-bitcoind:
+        condition: service_healthy  # waits for bitcoind RPC to be ready
     networks:
       - rtmpay-dev
     environment:
